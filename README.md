@@ -50,6 +50,7 @@ $ git-ssh-test-server [flags]
     --port int                       port number for SSH [GIT_SSH_PORT] (default 22)
     --repo_dir string                git repositories dir path [GIT_SSH_REPO_DIR] (default "~/git/repo")
     --shell_path string              git shell path [GIT_SSH_SHELL_PATH] (default "/usr/bin/git-shell")
+    --tcp_health_check_port int      port number for TCP Health Check [GIT_SSH_TCP_HEALTH_CHECK_PORT] (listen only when you specify port)
 -v, --version                        version for git-ssh-test-server
 ```
 
@@ -69,6 +70,7 @@ host_private_key_path:  /home/foo/.ssh/id_rsa
 port: 2222
 repo_dir: /home/foo/git/repo
 shell_path: "/usr/bin/git-shell"
+tcp_health_check_port: 5000
 ```
 
 ## Bugs and Feedback
