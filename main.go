@@ -27,8 +27,9 @@ const (
 
 	defaultConfigDirName = "." + cmdName
 
-	defaultPort      = 22
-	defaultShellPath = "/usr/bin/git-shell"
+	defaultPort               = 22
+	defaultTCPHealthCheckPort = 80
+	defaultShellPath          = "/usr/bin/git-shell"
 
 	defaultRepoDirName        = "git/repo"
 	defaultAuthorizedKeysName = "authorized_keys"
@@ -36,6 +37,7 @@ const (
 
 	flagNameConfig             = "config"
 	flagNamePort               = "port"
+	flagNameTCPHealthCheckPort = "tcp_health_check_port"
 	flagNameRepoDir            = "repo_dir"
 	flagNameShellPath          = "shell_path"
 	flagNameAuthorizedKeysPath = "authorized_keys_path"
@@ -44,6 +46,7 @@ const (
 
 type Config struct {
 	Port               int    `mapstructure:"port"`
+	TCPHealthCheckPort int    `mapstructure:"tcp_health_check_port"`
 	RepoDir            string `mapstructure:"repo_dir"`
 	ShellPath          string `mapstructure:"shell_path"`
 	AuthorizedKeysPath string `mapstructure:"authorized_keys_path"`
@@ -90,12 +93,14 @@ func main() {
 
 	flags.StringP(flagNameConfig, "c", defaultConfigFile, fmt.Sprintf("config file path [%s]", getEnvVarName(flagNameConfig)))
 	flags.Int(flagNamePort, defaultPort, fmt.Sprintf("port number for SSH [%s]", getEnvVarName(flagNamePort)))
+	flags.Int(flagNameTCPHealthCheckPort, 0, fmt.Sprintf("port number for TCP Health Check [%s] (listen only when you specify port)", getEnvVarName(flagNameTCPHealthCheckPort)))
 	flags.StringP(flagNameRepoDir, "", defaultRepoDir, fmt.Sprintf("git repositories dir path [%s]", getEnvVarName(flagNameRepoDir)))
 	flags.StringP(flagNameShellPath, "", defaultShellPath, fmt.Sprintf("git shell path [%s]", getEnvVarName(flagNameShellPath)))
 	flags.StringP(flagNameAuthorizedKeysPath, "", defaultAuthorizedKeysPath, fmt.Sprintf("authorized keys path [%s]", getEnvVarName(flagNameAuthorizedKeysPath)))
 	flags.StringP(flagNameHostPrivateKeyPath, "", defaultPrivateKey, fmt.Sprintf("host's private key path [%s]", getEnvVarName(flagNameHostPrivateKeyPath)))
 
 	_ = viper.BindPFlag(flagNamePort, flags.Lookup(flagNamePort))
+	_ = viper.BindPFlag(flagNameTCPHealthCheckPort, flags.Lookup(flagNameTCPHealthCheckPort))
 	_ = viper.BindPFlag(flagNameRepoDir, flags.Lookup(flagNameRepoDir))
 	_ = viper.BindPFlag(flagNameShellPath, flags.Lookup(flagNameShellPath))
 	_ = viper.BindPFlag(flagNameAuthorizedKeysPath, flags.Lookup(flagNameAuthorizedKeysPath))
@@ -137,6 +142,26 @@ func run(c *cobra.Command, args []string) {
 
 	sugar.Infof("config: %#v", config)
 
+	ready := make(chan struct{})
+	if config.TCPHealthCheckPort > 0 {
+		go func() {
+			<-ready
+			tcpLis, err := net.Listen("tcp", fmt.Sprintf(":%d", config.TCPHealthCheckPort))
+			if err != nil {
+				sugar.Fatalf("failed to listen tcp: %v", err)
+			}
+			sugar.Infof("start to serve on tcp port: %d", config.TCPHealthCheckPort)
+			for {
+				conn, err := tcpLis.Accept()
+				if err != nil {
+					sugar.Errorf("failed to accept tcp: %v", err)
+					continue
+				}
+				conn.Close()
+			}
+		}()
+	}
+
 	hostPrivateKey, err := ioutil.ReadFile(config.HostPrivateKeyPath)
 	if err != nil {
 		sugar.Fatalf("failed to read private key: %s %v", config.HostPrivateKeyPath, err)
@@ -163,7 +188,7 @@ func run(c *cobra.Command, args []string) {
 
 	sshLis, err := net.Listen("tcp", fmt.Sprintf(":%d", config.Port))
 	if err != nil {
-		sugar.Fatalf("failed to listen: %v", err)
+		sugar.Fatalf("failed to listen ssh: %v", err)
 	}
 	s := gitssh.Server{
 		RepoDir:            config.RepoDir,
@@ -174,10 +199,12 @@ func run(c *cobra.Command, args []string) {
 			sugar: sugar,
 		},
 	}
-	sugar.Infof("start to serve on port: %d", config.Port)
+	sugar.Infof("start to serve on ssh port: %d", config.Port)
+	ready <- struct{}{}
 	if err := s.Serve(sshLis); err != nil {
 		sugar.Errorf("failed to serve: %v", err)
 	}
+
 }
 
 func loggingPublicKeyCallback(authorizedKeys map[string]struct{}) gitssh.PublicKeyCallback {
