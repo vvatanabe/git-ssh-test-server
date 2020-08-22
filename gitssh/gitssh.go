@@ -119,29 +119,47 @@ type GitRequestTransfer func(ch ssh.Channel, req *ssh.Request, perms *ssh.Permis
 
 func LocalGitRequestTransfer(shellPath string) GitRequestTransfer {
 	return func(ch ssh.Channel, req *ssh.Request, perms *ssh.Permissions, packCmd, repoPath string) error {
-		cmd := newGitPackCmd(shellPath, packCmd, repoPath)
-
-		stdin, stdout, stderr, err := getPipes(cmd)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			stdin.Close()
-			stdout.Close()
-			stderr.Close()
-		}()
-
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("failed to start cmd: %w", err)
-		}
-		defer cmd.Wait()
-
 		if err := req.Reply(true, nil); err != nil {
 			return fmt.Errorf("failed to reply request: %w", err)
 		}
-
-		return forwardChannel(stdin, stdout, stderr, ch)
+		switch packCmd {
+		case "git-receive-pack":
+			return GitReceivePack(shellPath, repoPath, ch, ch.Stderr())
+		case "git-upload-pack":
+			return GitUploadPack(shellPath, repoPath, ch, ch.Stderr())
+		default:
+			return fmt.Errorf("no support command: %s", packCmd)
+		}
 	}
+}
+
+func GitReceivePack(shellPath, dir string, rw, rwe io.ReadWriter) error {
+	return gitPack(shellPath, dir, "git-receive-pack", rw, rwe)
+}
+
+func GitUploadPack(shellPath, dir string, rw, rwe io.ReadWriter) error {
+	return gitPack(shellPath, dir, "git-upload-pack", rw, rwe)
+}
+
+func gitPack(shellPath, dir, packCmd string, rw, rwe io.ReadWriter) error {
+	cmd := newGitPackCmd(shellPath, packCmd, dir)
+
+	stdin, stdout, stderr, err := getPipes(cmd)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+	}()
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start git-receive-pack: %w", err)
+	}
+	defer cmd.Wait()
+
+	return forwardIO(stdin, stdout, stderr, rw, rwe)
 }
 
 func getPipes(cmd *exec.Cmd) (stdin io.WriteCloser, stdout, stderr io.ReadCloser, err error) {
@@ -183,16 +201,16 @@ func newGitPackCmd(shellPath, packCmd, repoPath string) *exec.Cmd {
 	return cmd
 }
 
-func forwardChannel(stdin io.WriteCloser, stdout, stderr io.ReadCloser, ch ssh.Channel) error {
+func forwardIO(stdin io.WriteCloser, stdout, stderr io.ReadCloser, rw, rwe io.ReadWriter) error {
 	go func() {
-		io.Copy(stdin, ch)
+		io.Copy(stdin, rw)
 		stdin.Close()
 	}()
-	_, err := io.Copy(ch, stdout)
+	_, err := io.Copy(rw, stdout)
 	if err != nil {
 		return fmt.Errorf("failed to copy stdout: %w", err)
 	}
-	_, err = io.Copy(ch.Stderr(), stderr)
+	_, err = io.Copy(rwe, stderr)
 	if err != nil {
 		return fmt.Errorf("failed to copy stderr: %w", err)
 	}
