@@ -142,7 +142,7 @@ func run(c *cobra.Command, args []string) {
 
 	sugar.Infof("config: %#v", config)
 
-	ready := make(chan struct{})
+	ready := make(chan struct{}, 1)
 	if config.TCPHealthCheckPort > 0 {
 		go func() {
 			<-ready
