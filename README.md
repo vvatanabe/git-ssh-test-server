@@ -71,6 +71,7 @@ host_private_key_path:  /home/foo/.ssh/id_rsa
 port: 2222
 repo_dir: /home/foo/git/repo
 shell_path: "/usr/bin/git-shell"
+shutdown_timeout: 30s
 tcp_health_check_port: 5000
 ```
 
