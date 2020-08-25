@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -27,9 +30,9 @@ const (
 
 	defaultConfigDirName = "." + cmdName
 
-	defaultPort               = 22
-	defaultTCPHealthCheckPort = 80
-	defaultShellPath          = "/usr/bin/git-shell"
+	defaultPort            = 22
+	defaultShellPath       = "/usr/bin/git-shell"
+	defaultShutdownTimeout = 30 * time.Second
 
 	defaultRepoDirName        = "git/repo"
 	defaultAuthorizedKeysName = "authorized_keys"
@@ -42,15 +45,17 @@ const (
 	flagNameShellPath          = "shell_path"
 	flagNameAuthorizedKeysPath = "authorized_keys_path"
 	flagNameHostPrivateKeyPath = "host_private_key_path"
+	flagNameShutdownTimeout    = "shutdown_timeout"
 )
 
 type Config struct {
-	Port               int    `mapstructure:"port"`
-	TCPHealthCheckPort int    `mapstructure:"tcp_health_check_port"`
-	RepoDir            string `mapstructure:"repo_dir"`
-	ShellPath          string `mapstructure:"shell_path"`
-	AuthorizedKeysPath string `mapstructure:"authorized_keys_path"`
-	HostPrivateKeyPath string `mapstructure:"host_private_key_path"`
+	Port               int           `mapstructure:"port"`
+	TCPHealthCheckPort int           `mapstructure:"tcp_health_check_port"`
+	RepoDir            string        `mapstructure:"repo_dir"`
+	ShellPath          string        `mapstructure:"shell_path"`
+	AuthorizedKeysPath string        `mapstructure:"authorized_keys_path"`
+	HostPrivateKeyPath string        `mapstructure:"host_private_key_path"`
+	ShutdownTimeout    time.Duration `mapstructure:"shutdown_timeout"`
 }
 
 var (
@@ -98,6 +103,7 @@ func main() {
 	flags.StringP(flagNameShellPath, "", defaultShellPath, fmt.Sprintf("git shell path [%s]", getEnvVarName(flagNameShellPath)))
 	flags.StringP(flagNameAuthorizedKeysPath, "", defaultAuthorizedKeysPath, fmt.Sprintf("authorized keys path [%s]", getEnvVarName(flagNameAuthorizedKeysPath)))
 	flags.StringP(flagNameHostPrivateKeyPath, "", defaultPrivateKey, fmt.Sprintf("host's private key path [%s]", getEnvVarName(flagNameHostPrivateKeyPath)))
+	flags.DurationP(flagNameShutdownTimeout, "", defaultShutdownTimeout, fmt.Sprintf("process shutdown timeout [%s]", getEnvVarName(flagNameShutdownTimeout)))
 
 	_ = viper.BindPFlag(flagNamePort, flags.Lookup(flagNamePort))
 	_ = viper.BindPFlag(flagNameTCPHealthCheckPort, flags.Lookup(flagNameTCPHealthCheckPort))
@@ -105,6 +111,7 @@ func main() {
 	_ = viper.BindPFlag(flagNameShellPath, flags.Lookup(flagNameShellPath))
 	_ = viper.BindPFlag(flagNameAuthorizedKeysPath, flags.Lookup(flagNameAuthorizedKeysPath))
 	_ = viper.BindPFlag(flagNameHostPrivateKeyPath, flags.Lookup(flagNameHostPrivateKeyPath))
+	_ = viper.BindPFlag(flagNameShutdownTimeout, flags.Lookup(flagNameShutdownTimeout))
 
 	cobra.OnInitialize(func() {
 		configFile, err := flags.GetString(flagNameConfig)
@@ -199,12 +206,29 @@ func run(c *cobra.Command, args []string) {
 			sugar: sugar,
 		},
 	}
-	sugar.Infof("start to serve on ssh port: %d", config.Port)
-	ready <- struct{}{}
-	if err := s.Serve(sshLis); err != nil {
-		sugar.Errorf("failed to serve: %v", err)
+	go func() {
+		sugar.Infof("start to serve on ssh port: %d", config.Port)
+		ready <- struct{}{}
+		if err := s.Serve(sshLis); err != gitssh.ErrServerClosed && err != nil {
+			sugar.Errorf("failed to serve: %v", err)
+		}
+	}()
+
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
+
+	<-done
+
+	sugar.Info("received a signal")
+
+	ctx, cancel := context.WithTimeout(context.Background(), config.ShutdownTimeout)
+	defer cancel()
+
+	if err := s.Shutdown(ctx); err != nil {
+		sugar.Infof("failed to shutdown: %v", err)
 	}
 
+	sugar.Info("completed shutdown")
 }
 
 func loggingPublicKeyCallback(authorizedKeys map[string]struct{}) gitssh.PublicKeyCallback {

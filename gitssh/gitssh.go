@@ -1,6 +1,7 @@
 package gitssh
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -22,7 +25,18 @@ type Server struct {
 
 	Signer ssh.Signer
 	Logger Logger
+
+	inShutdown   int32 // 0 or 1. accessed atomically (non-zero means we're in Shutdown)
+	mu           sync.Mutex
+	listeners    map[*net.Listener]struct{}
+	listenerWg   sync.WaitGroup
+	activeConn   map[*ssh.ServerConn]struct{}
+	activeConnWg sync.WaitGroup
+	doneChan     chan struct{}
+	onShutdown   []func()
 }
+
+var ErrServerClosed = errors.New("gitssh: Server closed")
 
 func (srv *Server) Serve(lis net.Listener) error {
 
@@ -43,9 +57,34 @@ func (srv *Server) Serve(lis net.Listener) error {
 	}
 	cfg.AddHostKey(srv.Signer)
 
+	if !srv.trackListener(&lis, true) {
+		return ErrServerClosed
+	}
+	defer srv.trackListener(&lis, false)
+
+	var tempDelay time.Duration // how long to sleep on accept failure
+
 	for {
 		conn, err := lis.Accept()
 		if err != nil {
+			select {
+			case <-srv.getDoneChan():
+				return ErrServerClosed
+			default:
+			}
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if max := 1 * time.Second; tempDelay > max {
+					tempDelay = max
+				}
+				srv.Logger.Errorf("gitssh: Accept error: %v; retrying in %v", err, tempDelay)
+				time.Sleep(tempDelay)
+				continue
+			}
 			return err
 		}
 		go srv.handleConn(conn, cfg)
@@ -246,6 +285,112 @@ func splitPayload(payload []byte) (packCmd, repoPath string) {
 	packCmd = cmd
 	repoPath = path
 	return
+}
+
+func (srv *Server) trackListener(ln *net.Listener, add bool) bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.listeners == nil {
+		srv.listeners = make(map[*net.Listener]struct{})
+	}
+	if add {
+		if srv.shuttingDown() {
+			return false
+		}
+		srv.listeners[ln] = struct{}{}
+		srv.listenerWg.Add(1)
+	} else {
+		delete(srv.listeners, ln)
+		srv.listenerWg.Done()
+	}
+	return true
+}
+
+func (srv *Server) shuttingDown() bool {
+	return atomic.LoadInt32(&srv.inShutdown) != 0
+}
+
+func (srv *Server) trackConn(sConn *ssh.ServerConn, add bool) {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.activeConn == nil {
+		srv.activeConn = make(map[*ssh.ServerConn]struct{})
+	}
+	if add {
+		srv.activeConn[sConn] = struct{}{}
+		srv.activeConnWg.Add(1)
+	} else {
+		delete(srv.activeConn, sConn)
+		srv.activeConnWg.Done()
+	}
+}
+
+func (srv *Server) getDoneChan() <-chan struct{} {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return srv.getDoneChanLocked()
+}
+
+func (srv *Server) getDoneChanLocked() chan struct{} {
+	if srv.doneChan == nil {
+		srv.doneChan = make(chan struct{})
+	}
+	return srv.doneChan
+}
+
+func (srv *Server) closeDoneChanLocked() {
+	ch := srv.getDoneChanLocked()
+	select {
+	case <-ch:
+		// Already closed. Don't close again.
+	default:
+		// Safe to close here. We're the only closer, guarded
+		// by s.mu.
+		close(ch)
+	}
+}
+
+func (srv *Server) closeListenersLocked() error {
+	var err error
+	for ln := range srv.listeners {
+		if cerr := (*ln).Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+		delete(srv.listeners, ln)
+	}
+	return err
+}
+
+func (srv *Server) RegisterOnShutdown(f func()) {
+	srv.mu.Lock()
+	srv.onShutdown = append(srv.onShutdown, f)
+	srv.mu.Unlock()
+}
+
+func (srv *Server) Shutdown(ctx context.Context) error {
+	atomic.StoreInt32(&srv.inShutdown, 1)
+
+	srv.mu.Lock()
+	lnerr := srv.closeListenersLocked()
+	srv.closeDoneChanLocked()
+	for _, f := range srv.onShutdown {
+		go f()
+	}
+	srv.mu.Unlock()
+
+	finished := make(chan struct{}, 1)
+	go func() {
+		srv.listenerWg.Wait()
+		srv.activeConnWg.Wait()
+		finished <- struct{}{}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-finished:
+		return lnerr
+	}
 }
 
 type Logger interface {
