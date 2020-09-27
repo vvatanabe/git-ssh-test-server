@@ -261,7 +261,7 @@ func loggingPublicKeyCallback(authorizedKeys map[string]struct{}) gitssh.PublicK
 }
 func loggingGitRequestTransfer(shellPath string) gitssh.GitRequestTransfer {
 	t := gitssh.LocalGitRequestTransfer(shellPath)
-	return func(ch ssh.Channel, req *ssh.Request, perms *ssh.Permissions, packCmd, repoPath string) error {
+	return func(ctx context.Context, ch ssh.Channel, req *ssh.Request, perms *ssh.Permissions, packCmd, repoPath string) error {
 		startTime := time.Now()
 		chs := &ChannelWithSize{
 			Channel: ch,
@@ -284,7 +284,7 @@ func loggingGitRequestTransfer(shellPath string) gitssh.GitRequestTransfer {
 				"elapsed", finishTime.Sub(startTime),
 				"error", err)
 		}()
-		err = t(chs, req, perms, packCmd, repoPath)
+		err = t(ctx, chs, req, perms, packCmd, repoPath)
 		return err
 	}
 }

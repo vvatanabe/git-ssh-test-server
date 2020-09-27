@@ -100,6 +100,13 @@ func (srv *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 		return
 	}
 
+	baseCtx := context.Background()
+	ctx, cancelCtx := context.WithCancel(baseCtx)
+	go func() {
+		sConn.Wait()
+		cancelCtx()
+	}()
+
 	go ssh.DiscardRequests(globalReqs)
 
 	for newChan := range reqs {
@@ -107,11 +114,11 @@ func (srv *Server) handleConn(conn net.Conn, cfg *ssh.ServerConfig) {
 			newChan.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
 		}
-		srv.handleChannel(newChan, sConn.Permissions)
+		srv.handleChannel(ctx, newChan, sConn.Permissions)
 	}
 }
 
-func (srv *Server) handleChannel(newChan ssh.NewChannel, perms *ssh.Permissions) {
+func (srv *Server) handleChannel(ctx context.Context, newChan ssh.NewChannel, perms *ssh.Permissions) {
 	ch, reqs, err := newChan.Accept()
 	if err != nil {
 		srv.Logger.Errorf("failed to accept channel %v", err)
@@ -133,13 +140,13 @@ func (srv *Server) handleChannel(newChan ssh.NewChannel, perms *ssh.Permissions)
 		wg.Add(1)
 		go func(req *ssh.Request) {
 			defer wg.Done()
-			srv.handleGitRequest(ch, req, perms, cmdStr, filepath.Join(srv.RepoDir, repoPath))
+			srv.handleGitRequest(ctx, ch, req, perms, cmdStr, filepath.Join(srv.RepoDir, repoPath))
 		}(req)
 	}
 	wg.Wait()
 }
 
-func (srv *Server) handleGitRequest(ch ssh.Channel, req *ssh.Request, perms *ssh.Permissions, packCmd, repoPath string) {
+func (srv *Server) handleGitRequest(ctx context.Context, ch ssh.Channel, req *ssh.Request, perms *ssh.Permissions, packCmd, repoPath string) {
 	var err error
 	defer func() {
 		var code uint8
@@ -149,39 +156,53 @@ func (srv *Server) handleGitRequest(ch ssh.Channel, req *ssh.Request, perms *ssh
 		ch.SendRequest("exit-status", false, []byte{0, 0, 0, code})
 		ch.Close()
 	}()
-	err = srv.GitRequestTransfer(ch, req, perms, packCmd, repoPath)
+	err = srv.GitRequestTransfer(ctx, ch, req, perms, packCmd, repoPath)
 }
 
 type PublicKeyCallback func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error)
 
-type GitRequestTransfer func(ch ssh.Channel, req *ssh.Request, perms *ssh.Permissions, gitCmd, repoPath string) error
+type GitRequestTransfer func(ctx context.Context, ch ssh.Channel, req *ssh.Request, perms *ssh.Permissions, gitCmd, repoPath string) error
 
 func LocalGitRequestTransfer(shellPath string) GitRequestTransfer {
-	return func(ch ssh.Channel, req *ssh.Request, perms *ssh.Permissions, packCmd, repoPath string) error {
+	return func(ctx context.Context, ch ssh.Channel, req *ssh.Request, perms *ssh.Permissions, packCmd, repoPath string) error {
 		if err := req.Reply(true, nil); err != nil {
 			return fmt.Errorf("failed to reply request: %w", err)
 		}
 		switch packCmd {
 		case "git-receive-pack":
-			return GitReceivePack(shellPath, repoPath, ch, ch.Stderr())
+			return GitReceivePack(ctx, shellPath, repoPath, ch, ch.Stderr())
 		case "git-upload-pack":
-			return GitUploadPack(shellPath, repoPath, ch, ch.Stderr())
+			return GitUploadPack(ctx, shellPath, repoPath, ch, ch.Stderr())
 		default:
 			return fmt.Errorf("no support command: %s", packCmd)
 		}
 	}
 }
 
-func GitReceivePack(shellPath, dir string, rw, rwe io.ReadWriter) error {
-	return gitPack(shellPath, dir, "git-receive-pack", rw, rwe)
+func GitReceivePack(ctx context.Context, shellPath, dir string, rw, rwe io.ReadWriter) error {
+	return gitPack(ctx, shellPath, dir, "git-receive-pack", rw, rwe)
 }
 
-func GitUploadPack(shellPath, dir string, rw, rwe io.ReadWriter) error {
-	return gitPack(shellPath, dir, "git-upload-pack", rw, rwe)
+func GitUploadPack(ctx context.Context, shellPath, dir string, rw, rwe io.ReadWriter) error {
+	return gitPack(ctx, shellPath, dir, "git-upload-pack", rw, rwe)
 }
 
-func gitPack(shellPath, dir, packCmd string, rw, rwe io.ReadWriter) error {
+func gitPack(ctx context.Context, shellPath, dir, packCmd string, rw, rwe io.ReadWriter) error {
 	cmd := newGitPackCmd(shellPath, packCmd, dir)
+
+	finished := make(chan struct{}, 1)
+	defer func() {
+		cmd.Wait()
+		finished <- struct{}{}
+	}()
+
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-finished:
+		}
+		cleanUpProcessGroup(cmd)
+	}()
 
 	stdin, stdout, stderr, err := getPipes(cmd)
 	if err != nil {
@@ -194,11 +215,27 @@ func gitPack(shellPath, dir, packCmd string, rw, rwe io.ReadWriter) error {
 	}()
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start git-receive-pack: %w", err)
+		return fmt.Errorf("failed to start %s: %w", packCmd, err)
 	}
-	defer cmd.Wait()
 
-	return forwardIO(stdin, stdout, stderr, rw, rwe)
+	if err := forwardIO(stdin, stdout, stderr, rw, rwe); err != nil {
+		return fmt.Errorf("failed to forward io %s: %w", packCmd, err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("failed to wait %s: %w", packCmd, err)
+	}
+
+	return nil
+}
+
+func cleanUpProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if process := cmd.Process; process != nil && process.Pid > 0 {
+		syscall.Kill(-process.Pid, syscall.SIGTERM)
+	}
 }
 
 func getPipes(cmd *exec.Cmd) (stdin io.WriteCloser, stdout, stderr io.ReadCloser, err error) {
