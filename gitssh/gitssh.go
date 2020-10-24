@@ -315,10 +315,6 @@ func splitPayload(payload []byte) (packCmd, repoPath string) {
 	path := cmdArgs[1]
 	path = strings.Trim(path, "'")
 
-	if len(strings.Split(path, "/")) != 3 {
-		return
-	}
-
 	packCmd = cmd
 	repoPath = path
 	return

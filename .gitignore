@@ -19,3 +19,7 @@
 git-ssh-test-server
 
 dist
+
+host_key
+authorized_keys
+Dockerfile

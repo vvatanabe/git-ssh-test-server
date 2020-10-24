@@ -47,6 +47,7 @@ $ git-ssh-test-server [flags]
 -c, --config string                  config file path [GIT_SSH_CONFIG] (default "~/.git-ssh-test-server/config.yml")
 -h, --help                           help for git-ssh-test-server
     --host_private_key_path string   host's private key path [GIT_SSH_HOST_PRIVATE_KEY_PATH] (default "~/.ssh/id_rsa")
+    --proxy_protocol                 use proxy protocol [GIT_SSH_PROXY_PROTOCOL]
     --port int                       port number for SSH [GIT_SSH_PORT] (default 22)
     --repo_dir string                git repositories dir path [GIT_SSH_REPO_DIR] (default "~/git/repo")
     --shell_path string              git shell path [GIT_SSH_SHELL_PATH] (default "/usr/bin/git-shell")
@@ -69,6 +70,7 @@ Default config file extension can be either `.yml` or `.yaml`.
 authorized_keys_path: /home/foo/.ssh/authorized_keys
 host_private_key_path:  /home/foo/.ssh/id_rsa
 port: 2222
+proxy_protocol: true
 repo_dir: /home/foo/git/repo
 shell_path: "/usr/bin/git-shell"
 shutdown_timeout: 30s
