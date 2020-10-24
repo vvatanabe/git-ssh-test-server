@@ -3,6 +3,7 @@ module github.com/vvatanabe/git-ssh-test-server
 go 1.14
 
 require (
+	github.com/pires/go-proxyproto v0.2.0
 	github.com/spf13/cobra v1.0.0
 	github.com/spf13/viper v1.7.1
 	go.uber.org/zap v1.15.0

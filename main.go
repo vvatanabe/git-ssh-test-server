@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pires/go-proxyproto"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/vvatanabe/git-ssh-test-server/gitssh"
@@ -25,7 +27,7 @@ import (
 
 const (
 	cmdName       = "git-ssh-test-server"
-	envPrefix     = "GIT_SSH_"
+	envPrefix     = "git_ssh"
 	dotSSHDirName = ".ssh"
 
 	defaultConfigDirName = "." + cmdName
@@ -46,6 +48,7 @@ const (
 	flagNameAuthorizedKeysPath = "authorized_keys_path"
 	flagNameHostPrivateKeyPath = "host_private_key_path"
 	flagNameShutdownTimeout    = "shutdown_timeout"
+	flagNameProxyProtocol      = "proxy_protocol"
 )
 
 type Config struct {
@@ -56,6 +59,7 @@ type Config struct {
 	AuthorizedKeysPath string        `mapstructure:"authorized_keys_path"`
 	HostPrivateKeyPath string        `mapstructure:"host_private_key_path"`
 	ShutdownTimeout    time.Duration `mapstructure:"shutdown_timeout"`
+	ProxyProtocol      bool          `mapstructure:"proxy_protocol"`
 }
 
 var (
@@ -104,6 +108,7 @@ func main() {
 	flags.StringP(flagNameAuthorizedKeysPath, "", defaultAuthorizedKeysPath, fmt.Sprintf("authorized keys path [%s]", getEnvVarName(flagNameAuthorizedKeysPath)))
 	flags.StringP(flagNameHostPrivateKeyPath, "", defaultPrivateKey, fmt.Sprintf("host's private key path [%s]", getEnvVarName(flagNameHostPrivateKeyPath)))
 	flags.DurationP(flagNameShutdownTimeout, "", defaultShutdownTimeout, fmt.Sprintf("process shutdown timeout [%s]", getEnvVarName(flagNameShutdownTimeout)))
+	flags.Bool(flagNameProxyProtocol, false, fmt.Sprintf("use proxy protocol [%s]", getEnvVarName(flagNameProxyProtocol)))
 
 	_ = viper.BindPFlag(flagNamePort, flags.Lookup(flagNamePort))
 	_ = viper.BindPFlag(flagNameTCPHealthCheckPort, flags.Lookup(flagNameTCPHealthCheckPort))
@@ -112,6 +117,7 @@ func main() {
 	_ = viper.BindPFlag(flagNameAuthorizedKeysPath, flags.Lookup(flagNameAuthorizedKeysPath))
 	_ = viper.BindPFlag(flagNameHostPrivateKeyPath, flags.Lookup(flagNameHostPrivateKeyPath))
 	_ = viper.BindPFlag(flagNameShutdownTimeout, flags.Lookup(flagNameShutdownTimeout))
+	_ = viper.BindPFlag(flagNameProxyProtocol, flags.Lookup(flagNameProxyProtocol))
 
 	cobra.OnInitialize(func() {
 		configFile, err := flags.GetString(flagNameConfig)
@@ -142,7 +148,7 @@ func main() {
 }
 
 func getEnvVarName(s string) string {
-	return strings.ToUpper(envPrefix + s)
+	return strings.ToUpper(envPrefix + "_" + s)
 }
 
 func run(c *cobra.Command, args []string) {
@@ -182,7 +188,6 @@ func run(c *cobra.Command, args []string) {
 	if err != nil {
 		sugar.Fatalf("failed to load authorized_keys: %s %v", config.AuthorizedKeysPath, err)
 	}
-
 	authorizedKeys := make(map[string]struct{})
 	for len(authorizedKeysBytes) > 0 {
 		pubKey, _, _, rest, err := ssh.ParseAuthorizedKey(authorizedKeysBytes)
@@ -197,6 +202,11 @@ func run(c *cobra.Command, args []string) {
 	if err != nil {
 		sugar.Fatalf("failed to listen ssh: %v", err)
 	}
+
+	if config.ProxyProtocol {
+		sshLis = &proxyproto.Listener{Listener: sshLis}
+	}
+
 	s := gitssh.Server{
 		RepoDir:            config.RepoDir,
 		Signer:             hostPrivateKeySigner,
